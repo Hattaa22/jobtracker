@@ -3,7 +3,8 @@ require('dotenv').config();
 
 const connectionString = process.env.DATABASE_URL;
 
-const isRemote = connectionString && (connectionString.includes('supabase') || connectionString.includes('sslmode=require') || !connectionString.includes('localhost'));
+const isRemote = (connectionString && (connectionString.includes('supabase') || connectionString.includes('sslmode=require') || !connectionString.includes('localhost')))
+  || (process.env.DB_HOST && process.env.DB_HOST !== 'localhost');
 
 const poolConfig = connectionString
   ? { 
@@ -16,6 +17,7 @@ const poolConfig = connectionString
       user: process.env.DB_USER || 'postgres',
       password: process.env.DB_PASSWORD || 'postgres',
       database: process.env.DB_NAME || 'jobtracker',
+      ssl: isRemote ? { rejectUnauthorized: false } : false,
     };
 
 const pool = new Pool(poolConfig);
