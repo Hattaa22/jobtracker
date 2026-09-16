@@ -20,14 +20,24 @@ import {
   sampleFollowUps,
 } from './storage';
 
+import { getStoredToken } from './authService';
+
 const API_BASE = 'http://localhost:5000/api';
 
 async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {
+  const token = getStoredToken();
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(options?.headers as Record<string, string>),
+  };
+
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+
   const res = await fetch(url, {
-    headers: {
-      'Content-Type': 'application/json',
-    },
     ...options,
+    headers,
   });
   if (!res.ok) {
     const errorData = await res.json().catch(() => ({}));

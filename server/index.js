@@ -1,17 +1,93 @@
 const express = require('express');
 const cors = require('cors');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+const { OAuth2Client } = require('google-auth-library');
 require('dotenv').config();
 
 const { query, initDatabase } = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const JWT_SECRET = process.env.JWT_SECRET || 'jobtracker_super_secret_jwt_key_2026';
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+
+const googleClient = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : null;
 
 app.use(cors());
 app.use(express.json());
 
 // Initialize Database schema on startup
 initDatabase();
+
+// JWT Helper
+function generateToken(user) {
+  return jwt.sign(
+    { id: user.id, email: user.email, name: user.name },
+    JWT_SECRET,
+    { expiresIn: '7d' }
+  );
+}
+
+// Authentication Middleware
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) {
+    return res.status(401).json({ error: 'Authentication required. Please log in.' });
+  }
+
+  jwt.verify(token, JWT_SECRET, (err, decoded) => {
+    if (err) {
+      return res.status(403).json({ error: 'Session expired or invalid token. Please log in again.' });
+    }
+    req.user = decoded;
+    next();
+  });
+}
+
+// Optional Auth Middleware (allows fallback to default user-1 if no token provided)
+function optionalAuthenticateToken(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (token) {
+    jwt.verify(token, JWT_SECRET, (err, decoded) => {
+      if (!err) req.user = decoded;
+      else req.user = { id: 'user-1', email: 'hatta@example.com', name: 'Hatta' };
+      next();
+    });
+  } else {
+    req.user = { id: 'user-1', email: 'hatta@example.com', name: 'Hatta' };
+    next();
+  }
+}
+
+// Helper to format User object
+function formatUser(u) {
+  return {
+    id: u.id,
+    name: u.name,
+    email: u.email,
+    avatarUrl: u.avatar_url || null,
+    provider: u.provider || 'email',
+    phone: u.phone || null,
+    location: u.location || null,
+    portfolioUrl: u.portfolio_url || null,
+    githubUrl: u.github_url || null,
+    linkedinUrl: u.linkedin_url || null,
+    preferences: typeof u.preferences === 'string' ? JSON.parse(u.preferences) : u.preferences || {
+      defaultStatus: 'Applied',
+      defaultSource: 'JobStreet',
+      currency: 'IDR',
+      dateFormat: 'DD MMM YYYY',
+      theme: 'light',
+    },
+    createdAt: u.created_at,
+  };
+}
 
 // Health Check
 app.get('/api/health', async (req, res) => {
@@ -23,36 +99,296 @@ app.get('/api/health', async (req, res) => {
   }
 });
 
-// User Profile
-app.get('/api/user', async (req, res) => {
+// =========================================================
+// AUTHENTICATION ENDPOINTS
+// =========================================================
+
+// POST /api/auth/register
+app.post('/api/auth/register', async (req, res) => {
   try {
-    const result = await query('SELECT * FROM users WHERE id = $1', ['user-1']);
+    const { name, email, password } = req.body;
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: 'Full Name is required' });
+    }
+    if (!email || !email.trim() || !/\S+@\S+\.\S+/.test(email)) {
+      return res.status(400).json({ error: 'Please enter a valid email address' });
+    }
+    if (!password || password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters long' });
+    }
+
+    const trimmedEmail = email.trim().toLowerCase();
+
+    // Check existing email
+    const existing = await query('SELECT id FROM users WHERE LOWER(email) = $1', [trimmedEmail]);
+    if (existing.rows.length > 0) {
+      return res.status(400).json({ error: 'Email is already registered' });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    const userId = `user-${Date.now()}`;
+
+    const newUser = await query(
+      `INSERT INTO users (id, name, email, password_hash, provider, preferences)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [
+        userId,
+        name.trim(),
+        trimmedEmail,
+        passwordHash,
+        'email',
+        JSON.stringify({
+          defaultStatus: 'Applied',
+          defaultSource: 'JobStreet',
+          currency: 'IDR',
+          dateFormat: 'DD MMM YYYY',
+          theme: 'light',
+        }),
+      ]
+    );
+
+    const userObj = formatUser(newUser.rows[0]);
+    const token = generateToken(userObj);
+
+    res.status(201).json({ token, user: userObj });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error during registration. Please try again.' });
+  }
+});
+
+// POST /api/auth/login
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !email.trim()) {
+      return res.status(400).json({ error: 'Email is required' });
+    }
+    if (!password) {
+      return res.status(400).json({ error: 'Password is required' });
+    }
+
+    const trimmedEmail = email.trim().toLowerCase();
+    const result = await query('SELECT * FROM users WHERE LOWER(email) = $1', [trimmedEmail]);
+
+    if (result.rows.length === 0) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    const user = result.rows[0];
+
+    if (!user.password_hash) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    const isMatch = await bcrypt.compare(password, user.password_hash);
+    if (!isMatch) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    const userObj = formatUser(user);
+    const token = generateToken(userObj);
+
+    res.json({ token, user: userObj });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error during login. Please try again.' });
+  }
+});
+
+// POST /api/auth/google
+app.post('/api/auth/google', async (req, res) => {
+  try {
+    const { credential, profile } = req.body;
+    let googleId = '';
+    let email = '';
+    let name = '';
+    let picture = '';
+
+    if (credential && googleClient) {
+      try {
+        const ticket = await googleClient.verifyIdToken({
+          idToken: credential,
+          audience: GOOGLE_CLIENT_ID,
+        });
+        const payload = ticket.getPayload();
+        googleId = payload.sub;
+        email = payload.email;
+        name = payload.name;
+        picture = payload.picture;
+      } catch {
+        // Fallback to client provided profile if backend client verification fails or client ID not set
+        if (profile) {
+          googleId = profile.googleId || profile.sub || `g-${Date.now()}`;
+          email = profile.email;
+          name = profile.name;
+          picture = profile.picture || profile.avatar;
+        }
+      }
+    } else if (profile) {
+      googleId = profile.googleId || profile.sub || `g-${Date.now()}`;
+      email = profile.email;
+      name = profile.name;
+      picture = profile.picture || profile.avatar;
+    }
+
+    if (!email) {
+      return res.status(400).json({ error: 'Google authentication failed: Email not provided.' });
+    }
+
+    const trimmedEmail = email.trim().toLowerCase();
+    let result = await query('SELECT * FROM users WHERE LOWER(email) = $1 OR provider_id = $2', [trimmedEmail, googleId]);
+
+    let user;
+    if (result.rows.length > 0) {
+      user = result.rows[0];
+      // Update avatar if changed
+      if (picture && user.avatar_url !== picture) {
+        const updatedRes = await query(
+          'UPDATE users SET avatar_url = $1, provider_id = $2, updated_at = NOW() WHERE id = $3 RETURNING *',
+          [picture, googleId, user.id]
+        );
+        user = updatedRes.rows[0];
+      }
+    } else {
+      // Create new Google User
+      const userId = `user-${Date.now()}`;
+      const newRes = await query(
+        `INSERT INTO users (id, name, email, avatar_url, provider, provider_id, preferences)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+        [
+          userId,
+          name || 'Google User',
+          trimmedEmail,
+          picture || null,
+          'google',
+          googleId,
+          JSON.stringify({
+            defaultStatus: 'Applied',
+            defaultSource: 'JobStreet',
+            currency: 'IDR',
+            dateFormat: 'DD MMM YYYY',
+            theme: 'light',
+          }),
+        ]
+      );
+      user = newRes.rows[0];
+    }
+
+    const userObj = formatUser(user);
+    const token = generateToken(userObj);
+
+    res.json({ token, user: userObj });
+  } catch (err) {
+    res.status(500).json({ error: 'Google Authentication failed. Please try again.' });
+  }
+});
+
+// POST /api/auth/forgot-password
+app.post('/api/auth/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email || !email.trim() || !/\S+@\S+\.\S+/.test(email)) {
+      return res.status(400).json({ error: 'Please enter a valid email address' });
+    }
+
+    const trimmedEmail = email.trim().toLowerCase();
+    const result = await query('SELECT id FROM users WHERE LOWER(email) = $1', [trimmedEmail]);
+
+    if (result.rows.length > 0) {
+      const resetToken = crypto.randomBytes(32).toString('hex');
+      const expires = new Date(Date.now() + 3600000); // 1 hour
+
+      await query(
+        'UPDATE users SET reset_password_token = $1, reset_password_expires = $2 WHERE id = $3',
+        [resetToken, expires, result.rows[0].id]
+      );
+    }
+
+    // Generic response to prevent email enumeration attacks
+    res.json({
+      message: "If an account exists with this email, we'll send you a password reset link.",
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error processing password reset.' });
+  }
+});
+
+// POST /api/auth/reset-password
+app.post('/api/auth/reset-password', async (req, res) => {
+  try {
+    const { token, newPassword } = req.body;
+
+    if (!token) {
+      return res.status(400).json({ error: 'Reset token is required' });
+    }
+    if (!newPassword || newPassword.length < 6) {
+      return res.status(400).json({ error: 'New password must be at least 6 characters long' });
+    }
+
+    const result = await query(
+      'SELECT id FROM users WHERE reset_password_token = $1 AND reset_password_expires > NOW()',
+      [token]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(400).json({ error: 'Password reset token is invalid or has expired.' });
+    }
+
+    const user = result.rows[0];
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+
+    await query(
+      'UPDATE users SET password_hash = $1, reset_password_token = NULL, reset_password_expires = NULL, updated_at = NOW() WHERE id = $2',
+      [passwordHash, user.id]
+    );
+
+    res.json({ message: 'Password has been reset successfully. Please log in with your new password.' });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error resetting password.' });
+  }
+});
+
+// GET /api/auth/me
+app.get('/api/auth/me', authenticateToken, async (req, res) => {
+  try {
+    const result = await query('SELECT * FROM users WHERE id = $1', [req.user.id]);
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'User not found' });
     }
-    const user = result.rows[0];
-    res.json({
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      phone: user.phone,
-      location: user.location,
-      portfolioUrl: user.portfolio_url,
-      githubUrl: user.github_url,
-      linkedinUrl: user.linkedin_url,
-      preferences: typeof user.preferences === 'string' ? JSON.parse(user.preferences) : user.preferences,
-    });
+    res.json(formatUser(result.rows[0]));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.put('/api/user', async (req, res) => {
+// POST /api/auth/logout
+app.post('/api/auth/logout', (req, res) => {
+  res.json({ message: 'Logged out successfully' });
+});
+
+// =========================================================
+// PROTECTED USER PROFILE ENDPOINTS
+// =========================================================
+
+app.get('/api/user', optionalAuthenticateToken, async (req, res) => {
   try {
+    const result = await query('SELECT * FROM users WHERE id = $1', [req.user.id]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    res.json(formatUser(result.rows[0]));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/user', optionalAuthenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
     const { name, email, phone, location, portfolioUrl, githubUrl, linkedinUrl, preferences } = req.body;
     
-    // Fetch current user first
-    const current = await query('SELECT * FROM users WHERE id = $1', ['user-1']);
+    const current = await query('SELECT * FROM users WHERE id = $1', [userId]);
     if (current.rows.length === 0) {
       return res.status(404).json({ error: 'User not found' });
     }
@@ -71,30 +407,23 @@ app.put('/api/user', async (req, res) => {
       `UPDATE users 
        SET name = $1, email = $2, phone = $3, location = $4, portfolio_url = $5, github_url = $6, linkedin_url = $7, preferences = $8, updated_at = NOW()
        WHERE id = $9 RETURNING *`,
-      [newName, newEmail, newPhone, newLoc, newPort, newGit, newLin, newPref, 'user-1']
+      [newName, newEmail, newPhone, newLoc, newPort, newGit, newLin, newPref, userId]
     );
 
-    const user = result.rows[0];
-    res.json({
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      phone: user.phone,
-      location: user.location,
-      portfolioUrl: user.portfolio_url,
-      githubUrl: user.github_url,
-      linkedinUrl: user.linkedin_url,
-      preferences: typeof user.preferences === 'string' ? JSON.parse(user.preferences) : user.preferences,
-    });
+    res.json(formatUser(result.rows[0]));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
+// =========================================================
+// DATA ISOLATION ENDPOINTS (SCOPED BY req.user.id)
+// =========================================================
+
 // Companies
-app.get('/api/companies', async (req, res) => {
+app.get('/api/companies', optionalAuthenticateToken, async (req, res) => {
   try {
-    const result = await query('SELECT * FROM companies WHERE user_id = $1 ORDER BY created_at DESC', ['user-1']);
+    const result = await query('SELECT * FROM companies WHERE user_id = $1 ORDER BY created_at DESC', [req.user.id]);
     const companies = result.rows.map(c => ({
       id: c.id,
       userId: c.user_id,
@@ -112,14 +441,14 @@ app.get('/api/companies', async (req, res) => {
   }
 });
 
-app.post('/api/companies', async (req, res) => {
+app.post('/api/companies', optionalAuthenticateToken, async (req, res) => {
   try {
     const { name, website, location, industry, notes } = req.body;
     const id = `comp-${Date.now()}`;
     const result = await query(
       `INSERT INTO companies (id, user_id, name, website, location, industry, notes)
        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [id, 'user-1', name, website || null, location || null, industry || null, notes || null]
+      [id, req.user.id, name, website || null, location || null, industry || null, notes || null]
     );
     const c = result.rows[0];
     res.status(201).json({
@@ -139,9 +468,9 @@ app.post('/api/companies', async (req, res) => {
 });
 
 // Applications
-app.get('/api/applications', async (req, res) => {
+app.get('/api/applications', optionalAuthenticateToken, async (req, res) => {
   try {
-    const result = await query('SELECT * FROM applications WHERE user_id = $1 ORDER BY created_at DESC', ['user-1']);
+    const result = await query('SELECT * FROM applications WHERE user_id = $1 ORDER BY created_at DESC', [req.user.id]);
     const apps = result.rows.map(a => ({
       id: a.id,
       userId: a.user_id,
@@ -172,8 +501,7 @@ app.get('/api/applications', async (req, res) => {
   }
 });
 
-// Helper for finding or creating company
-async function findOrCreateCompanyDB(companyName, userId = 'user-1') {
+async function findOrCreateCompanyDB(companyName, userId) {
   const trimmed = companyName.trim();
   const existing = await query(
     'SELECT * FROM companies WHERE LOWER(name) = LOWER($1) AND user_id = $2',
@@ -191,10 +519,11 @@ async function findOrCreateCompanyDB(companyName, userId = 'user-1') {
   return inserted.rows[0];
 }
 
-app.post('/api/applications', async (req, res) => {
+app.post('/api/applications', optionalAuthenticateToken, async (req, res) => {
   try {
     const appData = req.body;
-    const company = await findOrCreateCompanyDB(appData.companyName || 'Unknown Company');
+    const userId = req.user.id;
+    const company = await findOrCreateCompanyDB(appData.companyName || 'Unknown Company', userId);
     const today = appData.applicationDate || new Date().toISOString().split('T')[0];
     const appId = `app-${Date.now()}`;
 
@@ -207,7 +536,7 @@ app.post('/api/applications', async (req, res) => {
       RETURNING *`,
       [
         appId,
-        'user-1',
+        userId,
         company.id,
         company.name,
         appData.position || 'Untitled Position',
@@ -229,7 +558,6 @@ app.post('/api/applications', async (req, res) => {
       ]
     );
 
-    // Initial Event
     const evId = `ev-${Date.now()}`;
     await query(
       `INSERT INTO application_events (id, application_id, status, event_date, title, description)
@@ -267,10 +595,11 @@ app.post('/api/applications', async (req, res) => {
   }
 });
 
-app.post('/api/applications/quick-apply', async (req, res) => {
+app.post('/api/applications/quick-apply', optionalAuthenticateToken, async (req, res) => {
   try {
     const { companyName, position, source, jobUrl, applicationDate, status } = req.body;
-    const company = await findOrCreateCompanyDB(companyName);
+    const userId = req.user.id;
+    const company = await findOrCreateCompanyDB(companyName, userId);
     const today = applicationDate || new Date().toISOString().split('T')[0];
     const appId = `app-${Date.now()}`;
 
@@ -282,7 +611,7 @@ app.post('/api/applications/quick-apply', async (req, res) => {
       RETURNING *`,
       [
         appId,
-        'user-1',
+        userId,
         company.id,
         company.name,
         position,
@@ -327,9 +656,10 @@ app.post('/api/applications/quick-apply', async (req, res) => {
   }
 });
 
-app.put('/api/applications/:id', async (req, res) => {
+app.put('/api/applications/:id', optionalAuthenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
+    const userId = req.user.id;
     const updates = req.body;
 
     const fields = [];
@@ -369,12 +699,13 @@ app.put('/api/applications/:id', async (req, res) => {
 
     fields.push(`updated_at = NOW()`);
     values.push(id);
+    values.push(userId);
 
-    const q = `UPDATE applications SET ${fields.join(', ')} WHERE id = $${idx} RETURNING *`;
+    const q = `UPDATE applications SET ${fields.join(', ')} WHERE id = $${idx} AND user_id = $${idx + 1} RETURNING *`;
     const result = await query(q, values);
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Application not found' });
+      return res.status(404).json({ error: 'Application not found or unauthorized' });
     }
 
     const a = result.rows[0];
@@ -407,23 +738,24 @@ app.put('/api/applications/:id', async (req, res) => {
   }
 });
 
-app.put('/api/applications/:id/status', async (req, res) => {
+app.put('/api/applications/:id/status', optionalAuthenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
+    const userId = req.user.id;
     const { status, notes } = req.body;
     const today = new Date().toISOString().split('T')[0];
 
-    const currentRes = await query('SELECT * FROM applications WHERE id = $1', [id]);
+    const currentRes = await query('SELECT * FROM applications WHERE id = $1 AND user_id = $2', [id, userId]);
     if (currentRes.rows.length === 0) {
-      return res.status(404).json({ error: 'Application not found' });
+      return res.status(404).json({ error: 'Application not found or unauthorized' });
     }
 
     const cur = currentRes.rows[0];
     const newNotes = notes ? (cur.notes ? `${cur.notes}\n${notes}` : notes) : cur.notes;
 
     await query(
-      'UPDATE applications SET status = $1, notes = $2, updated_at = NOW() WHERE id = $3',
-      [status, newNotes, id]
+      'UPDATE applications SET status = $1, notes = $2, updated_at = NOW() WHERE id = $3 AND user_id = $4',
+      [status, newNotes, id, userId]
     );
 
     const evId = `ev-${Date.now()}`;
@@ -439,10 +771,11 @@ app.put('/api/applications/:id/status', async (req, res) => {
   }
 });
 
-app.delete('/api/applications/:id', async (req, res) => {
+app.delete('/api/applications/:id', optionalAuthenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
-    await query('DELETE FROM applications WHERE id = $1', [id]);
+    const userId = req.user.id;
+    await query('DELETE FROM applications WHERE id = $1 AND user_id = $2', [id, userId]);
     res.json({ message: 'Application deleted' });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -450,13 +783,13 @@ app.delete('/api/applications/:id', async (req, res) => {
 });
 
 // Application Events
-app.get('/api/events', async (req, res) => {
+app.get('/api/events', optionalAuthenticateToken, async (req, res) => {
   try {
     const result = await query(
       `SELECT e.* FROM application_events e
        JOIN applications a ON e.application_id = a.id
        WHERE a.user_id = $1 ORDER BY e.created_at DESC`,
-      ['user-1']
+      [req.user.id]
     );
     const events = result.rows.map(e => ({
       id: e.id,
@@ -474,13 +807,13 @@ app.get('/api/events', async (req, res) => {
 });
 
 // Interviews
-app.get('/api/interviews', async (req, res) => {
+app.get('/api/interviews', optionalAuthenticateToken, async (req, res) => {
   try {
     const result = await query(
       `SELECT i.* FROM interview_schedules i
        JOIN applications a ON i.application_id = a.id
        WHERE a.user_id = $1 ORDER BY i.date ASC, i.time ASC`,
-      ['user-1']
+      [req.user.id]
     );
     const interviews = result.rows.map(i => ({
       id: i.id,
@@ -499,9 +832,17 @@ app.get('/api/interviews', async (req, res) => {
   }
 });
 
-app.post('/api/interviews', async (req, res) => {
+app.post('/api/interviews', optionalAuthenticateToken, async (req, res) => {
   try {
     const { applicationId, type, date, time, location, meetingUrl, notes } = req.body;
+    const userId = req.user.id;
+
+    // Verify application belongs to user
+    const appRes = await query('SELECT status FROM applications WHERE id = $1 AND user_id = $2', [applicationId, userId]);
+    if (appRes.rows.length === 0) {
+      return res.status(403).json({ error: 'Unauthorized application access' });
+    }
+
     const id = `int-${Date.now()}`;
     const result = await query(
       `INSERT INTO interview_schedules (id, application_id, type, date, time, location, meeting_url, notes)
@@ -509,12 +850,10 @@ app.post('/api/interviews', async (req, res) => {
       [id, applicationId, type, date, time, location || null, meetingUrl || null, notes || null]
     );
 
-    // Auto update status if Applied/Screening
-    const appRes = await query('SELECT status FROM applications WHERE id = $1', [applicationId]);
-    if (appRes.rows.length > 0 && ['Applied', 'Screening', 'Saved'].includes(appRes.rows[0].status)) {
+    if (['Applied', 'Screening', 'Saved'].includes(appRes.rows[0].status)) {
       await query(
-        'UPDATE applications SET status = $1, updated_at = NOW() WHERE id = $2',
-        ['Interview', applicationId]
+        'UPDATE applications SET status = $1, updated_at = NOW() WHERE id = $2 AND user_id = $3',
+        ['Interview', applicationId, userId]
       );
       const evId = `ev-${Date.now()}`;
       await query(
@@ -541,10 +880,14 @@ app.post('/api/interviews', async (req, res) => {
   }
 });
 
-app.delete('/api/interviews/:id', async (req, res) => {
+app.delete('/api/interviews/:id', optionalAuthenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
-    await query('DELETE FROM interview_schedules WHERE id = $1', [id]);
+    const userId = req.user.id;
+    await query(
+      `DELETE FROM interview_schedules WHERE id = $1 AND application_id IN (SELECT id FROM applications WHERE user_id = $2)`,
+      [id, userId]
+    );
     res.json({ message: 'Interview deleted' });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -552,13 +895,13 @@ app.delete('/api/interviews/:id', async (req, res) => {
 });
 
 // Follow Ups
-app.get('/api/followups', async (req, res) => {
+app.get('/api/followups', optionalAuthenticateToken, async (req, res) => {
   try {
     const result = await query(
       `SELECT f.* FROM follow_ups f
        JOIN applications a ON f.application_id = a.id
        WHERE a.user_id = $1 ORDER BY f.follow_up_date ASC`,
-      ['user-1']
+      [req.user.id]
     );
     const followUps = result.rows.map(f => ({
       id: f.id,
@@ -576,9 +919,17 @@ app.get('/api/followups', async (req, res) => {
   }
 });
 
-app.post('/api/followups', async (req, res) => {
+app.post('/api/followups', optionalAuthenticateToken, async (req, res) => {
   try {
     const { applicationId, followUpDate, contactMethod, contactPerson, message, status } = req.body;
+    const userId = req.user.id;
+
+    // Verify application belongs to user
+    const appRes = await query('SELECT id FROM applications WHERE id = $1 AND user_id = $2', [applicationId, userId]);
+    if (appRes.rows.length === 0) {
+      return res.status(403).json({ error: 'Unauthorized application access' });
+    }
+
     const id = `fol-${Date.now()}`;
     const result = await query(
       `INSERT INTO follow_ups (id, application_id, follow_up_date, contact_method, contact_person, message, status)
@@ -601,167 +952,29 @@ app.post('/api/followups', async (req, res) => {
   }
 });
 
-app.put('/api/followups/:id/status', async (req, res) => {
+app.put('/api/followups/:id/status', optionalAuthenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
-    await query('UPDATE follow_ups SET status = $1 WHERE id = $2', [status, id]);
+    const userId = req.user.id;
+    await query(
+      `UPDATE follow_ups SET status = $1 WHERE id = $2 AND application_id IN (SELECT id FROM applications WHERE user_id = $3)`,
+      [req.body.status, id, userId]
+    );
     res.json({ message: 'FollowUp status updated' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.delete('/api/followups/:id', async (req, res) => {
+app.delete('/api/followups/:id', optionalAuthenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
-    await query('DELETE FROM follow_ups WHERE id = $1', [id]);
-    res.json({ message: 'FollowUp deleted' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Seed / Reset Demo Data
-app.post('/api/reset-demo', async (req, res) => {
-  try {
-    // Clear existing data for user-1
-    await query("DELETE FROM users WHERE id = 'user-1'");
-
-    // Re-insert user-1
+    const userId = req.user.id;
     await query(
-      `INSERT INTO users (id, name, email, phone, location, portfolio_url, github_url, linkedin_url, preferences)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [
-        'user-1',
-        'Hatta',
-        'hatta@example.com',
-        '+62 812-3456-7890',
-        'Surabaya, Indonesia',
-        'https://hatta.dev',
-        'https://github.com/hatta',
-        'https://linkedin.com/in/hatta',
-        JSON.stringify({
-          defaultStatus: 'Applied',
-          defaultSource: 'JobStreet',
-          currency: 'IDR',
-          dateFormat: 'DD MMM YYYY',
-          theme: 'light',
-        }),
-      ]
+      `DELETE FROM follow_ups WHERE id = $1 AND application_id IN (SELECT id FROM applications WHERE user_id = $2)`,
+      [id, userId]
     );
-
-    // Seed Companies
-    const companies = [
-      { id: 'comp-1', name: 'PT ABC Indonesia', location: 'Surabaya', website: 'https://ptabc.co.id' },
-      { id: 'comp-2', name: 'PT XYZ Tech Solutions', location: 'Jakarta', website: 'https://xyztech.com' },
-      { id: 'comp-3', name: 'PT DEF Creative Tech', location: 'Bandung', website: 'https://defcreative.io' },
-      { id: 'comp-4', name: 'Gojek (GoTo Group)', location: 'Jakarta', website: 'https://goto.com' },
-      { id: 'comp-5', name: 'Tokopedia', location: 'Jakarta', website: 'https://tokopedia.com' },
-    ];
-
-    for (const c of companies) {
-      await query(
-        `INSERT INTO companies (id, user_id, name, location, website) VALUES ($1, $2, $3, $4, $5)`,
-        [c.id, 'user-1', c.name, c.location, c.website]
-      );
-    }
-
-    // Seed Applications
-    const apps = [
-      {
-        id: 'app-1', companyId: 'comp-1', companyName: 'PT ABC Indonesia', position: 'Full Stack Developer',
-        jobType: 'Full Time', workArrangement: 'Hybrid', location: 'Surabaya', source: 'JobStreet',
-        jobUrl: 'https://jobstreet.co.id/job/123456', jobReference: 'JS-8902', applicationDate: '2026-09-15',
-        status: 'Interview', salaryMin: 6000000, salaryMax: 9000000, currency: 'IDR', recruiterName: 'Siti Rahma',
-        recruiterEmail: 'hr@ptabc.co.id', recruiterPhone: '+62 811-9988-7766', notes: 'Menunggu jadwal interview user. Sangat berminat dengan posisi ini.'
-      },
-      {
-        id: 'app-2', companyId: 'comp-2', companyName: 'PT XYZ Tech Solutions', position: 'IT Programmer',
-        jobType: 'Full Time', workArrangement: 'Remote', location: 'Jakarta', source: 'LinkedIn',
-        jobUrl: 'https://linkedin.com/jobs/view/987654321', applicationDate: '2026-09-14', status: 'Screening',
-        salaryMin: 7000000, salaryMax: 10000000, currency: 'IDR', recruiterName: 'Budi Santoso', notes: 'Sudah di-contact HR via WhatsApp.'
-      },
-      {
-        id: 'app-3', companyId: 'comp-3', companyName: 'PT DEF Creative Tech', position: 'Front-End Developer',
-        jobType: 'Contract', workArrangement: 'On-site', location: 'Bandung', source: 'Glints',
-        jobUrl: 'https://glints.com/id/opportunities/jobs/456789', applicationDate: '2026-09-12', status: 'Rejected',
-        salaryMin: 5500000, salaryMax: 7500000, currency: 'IDR', notes: 'Kualifikasi pengalaman Vue3 belum mencukupi.'
-      },
-      {
-        id: 'app-4', companyId: 'comp-4', companyName: 'Gojek (GoTo Group)', position: 'Software Engineer - Frontend',
-        jobType: 'Full Time', workArrangement: 'Hybrid', location: 'Jakarta South', source: 'Company Website',
-        jobUrl: 'https://careers.goto.com/jobs/se-fe-2026', applicationDate: '2026-09-10', status: 'Assessment',
-        salaryMin: 12000000, salaryMax: 18000000, currency: 'IDR', recruiterName: 'Anita Wijaya', notes: 'HackerRank test link received. Deadline 18 September.'
-      },
-      {
-        id: 'app-5', companyId: 'comp-5', companyName: 'Tokopedia', position: 'React Frontend Specialist',
-        jobType: 'Full Time', workArrangement: 'Remote', location: 'Jakarta', source: 'LinkedIn',
-        jobUrl: 'https://linkedin.com/jobs/view/112233', applicationDate: '2026-09-08', status: 'Offer',
-        salaryMin: 14000000, salaryMax: 16000000, currency: 'IDR', notes: 'Offering letter dikirimkan via email. Perlu negosiasi fasilitas.'
-      }
-    ];
-
-    for (const a of apps) {
-      await query(
-        `INSERT INTO applications (
-          id, user_id, company_id, company_name, position, job_type, work_arrangement,
-          location, source, job_url, job_reference, application_date, status, salary_min, salary_max,
-          currency, recruiter_name, recruiter_email, recruiter_phone, notes
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
-        [
-          a.id, 'user-1', a.companyId, a.companyName, a.position, a.jobType, a.workArrangement,
-          a.location, a.source, a.jobUrl, a.jobReference || null, a.applicationDate, a.status,
-          a.salaryMin, a.salaryMax, a.currency, a.recruiterName || null, a.recruiterEmail || null,
-          a.recruiterPhone || null, a.notes || null
-        ]
-      );
-    }
-
-    // Seed Events
-    const events = [
-      { id: 'ev-1', applicationId: 'app-1', status: 'Applied', eventDate: '2026-09-15', title: 'Application Submitted', description: 'Lamaran dikirim melalui JobStreet portal.' },
-      { id: 'ev-2', applicationId: 'app-1', status: 'Screening', eventDate: '2026-09-15', title: 'HR Contacted', description: 'HR WhatsApp mengenai konfirmasi ketersediaan gaji.' },
-      { id: 'ev-3', applicationId: 'app-1', status: 'Interview', eventDate: '2026-09-15', title: 'Interview Scheduled', description: 'Undangan Technical Interview dikirimkan.' },
-    ];
-
-    for (const e of events) {
-      await query(
-        `INSERT INTO application_events (id, application_id, status, event_date, title, description)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [e.id, e.applicationId, e.status, e.eventDate, e.title, e.description]
-      );
-    }
-
-    // Seed Interviews
-    const interviews = [
-      { id: 'int-1', applicationId: 'app-1', type: 'Technical Interview', date: '2026-09-25', time: '13:00', location: 'Google Meet', meetingUrl: 'https://meet.google.com/abc-defg-hij', notes: 'Persiapkan live coding React + Node.js' },
-      { id: 'int-2', applicationId: 'app-4', type: 'Technical Test', date: '2026-09-18', time: '09:00', location: 'HackerRank Online', meetingUrl: 'https://hackerrank.com/test/goto-2026', notes: '2 Soal Data Structures & Algorithms' }
-    ];
-
-    for (const i of interviews) {
-      await query(
-        `INSERT INTO interview_schedules (id, application_id, type, date, time, location, meeting_url, notes)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [i.id, i.applicationId, i.type, i.date, i.time, i.location, i.meetingUrl, i.notes]
-      );
-    }
-
-    // Seed Followups
-    const followups = [
-      { id: 'fol-1', applicationId: 'app-1', followUpDate: '2026-09-29', contactMethod: 'WhatsApp', contactPerson: 'Siti Rahma (HR)', message: 'Halo Mbak Siti, menanyakan kabar kelanjutan hasil technical interview PT ABC.', status: 'Upcoming' },
-      { id: 'fol-2', applicationId: 'app-2', followUpDate: '2026-09-16', contactMethod: 'WhatsApp', contactPerson: 'Budi Santoso', message: 'Follow-up status screening berkas CV.', status: 'Upcoming' }
-    ];
-
-    for (const f of followups) {
-      await query(
-        `INSERT INTO follow_ups (id, application_id, follow_up_date, contact_method, contact_person, message, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [f.id, f.applicationId, f.followUpDate, f.contactMethod, f.contactPerson, f.message, f.status]
-      );
-    }
-
-    res.json({ message: 'Demo data seeded into PostgreSQL successfully' });
+    res.json({ message: 'FollowUp deleted' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

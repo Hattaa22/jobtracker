@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { AuthProvider, useAuth } from './context/AuthContext';
 import { JobProvider, useJobContext } from './context/JobContext';
 import { Sidebar } from './components/layout/Sidebar';
 import { Header } from './components/layout/Header';
@@ -22,11 +23,16 @@ import { AnalyticsView } from './components/analytics/AnalyticsView';
 import { FollowUpList } from './components/followups/FollowUpList';
 import { SettingsView } from './components/settings/SettingsView';
 
+import { LoginForm } from './components/auth/LoginForm';
+import { RegisterForm } from './components/auth/RegisterForm';
+import { ForgotPasswordForm } from './components/auth/ForgotPasswordForm';
+
 import type { Application } from './types';
-import { Plus, LayoutList, Kanban, Zap, Eye } from 'lucide-react';
+import { Plus, LayoutList, Kanban, Zap, Eye, Loader2 } from 'lucide-react';
 
 const MainContent: React.FC = () => {
-  const { applications } = useJobContext();
+  const { applications, refreshData } = useJobContext();
+  const { user } = useAuth();
   const [activeTab, setActiveTab] = useState('dashboard');
   const [viewMode, setViewMode] = useState<'table' | 'kanban'>('table');
 
@@ -38,6 +44,13 @@ const MainContent: React.FC = () => {
   const [appToDelete, setAppToDelete] = useState<Application | null>(null);
 
   const { deleteApplication } = useJobContext();
+
+  // Reload user data whenever authenticated user changes
+  useEffect(() => {
+    if (user) {
+      refreshData();
+    }
+  }, [user, refreshData]);
 
   // Dashboard top 3 recent applications
   const recentApplications = [...applications]
@@ -60,6 +73,7 @@ const MainContent: React.FC = () => {
           activeTab={activeTab}
           onOpenQuickApply={() => setIsQuickApplyOpen(true)}
           onOpenExport={() => setIsExportOpen(true)}
+          onNavigateToSettings={() => setActiveTab('settings')}
         />
 
         <main style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1.5rem', maxWidth: '90rem', width: '100%', margin: '0 auto', flex: 1 }}>
@@ -279,10 +293,73 @@ const MainContent: React.FC = () => {
   );
 };
 
-export default function App() {
+const AppContent: React.FC = () => {
+  const { isAuthenticated, isLoading } = useAuth();
+  const [authView, setAuthView] = useState<'login' | 'register' | 'forgot-password'>('login');
+
+  if (isLoading) {
+    return (
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          minHeight: '100vh',
+          backgroundColor: 'var(--background)',
+          color: 'var(--text-primary)',
+          gap: '1rem',
+        }}
+      >
+        <Loader2 style={{ width: '2.5rem', height: '2.5rem', color: '#0284C7', animation: 'spin 1s linear infinite' }} />
+        <p style={{ fontSize: '0.875rem', color: 'var(--text-muted)', fontWeight: 600 }}>Loading JobTracker...</p>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <div
+        style={{
+          minHeight: '100vh',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          backgroundColor: 'var(--background)',
+          color: 'var(--text-primary)',
+        }}
+      >
+        {authView === 'register' ? (
+          <RegisterForm
+            onNavigateToLogin={() => setAuthView('login')}
+            onRegisterSuccess={() => setAuthView('login')}
+          />
+        ) : authView === 'forgot-password' ? (
+          <ForgotPasswordForm
+            onNavigateToLogin={() => setAuthView('login')}
+          />
+        ) : (
+          <LoginForm
+            onNavigateToRegister={() => setAuthView('register')}
+            onNavigateToForgotPassword={() => setAuthView('forgot-password')}
+            onLoginSuccess={() => {}}
+          />
+        )}
+      </div>
+    );
+  }
+
   return (
     <JobProvider>
       <MainContent />
     </JobProvider>
+  );
+};
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <AppContent />
+    </AuthProvider>
   );
 }
