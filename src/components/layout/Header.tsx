@@ -13,7 +13,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenExport,
   activeTab,
 }) => {
-  const { user, theme, setTheme } = useJobContext();
+  const { user, theme, setTheme, isPostgresConnected } = useJobContext();
 
   const getGreeting = () => {
     const hour = new Date().getHours();
@@ -73,9 +73,36 @@ export const Header: React.FC<HeaderProps> = ({
         >
           {titleMap[activeTab] || 'Dashboard'}
         </h2>
-        <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.125rem' }}>
-          {getGreeting()}, {user.name} 👋 Track your job search progress.
-        </p>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.125rem', margin: 0 }}>
+            {getGreeting()}, {user.name} 👋 Track your job search progress.
+          </p>
+          <span
+            title={isPostgresConnected ? 'Terhubung ke PostgreSQL Database' : 'Database Offline / LocalStorage Mode'}
+            style={{
+              fontSize: '0.7rem',
+              padding: '0.15rem 0.5rem',
+              borderRadius: '9999px',
+              fontWeight: 600,
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '0.25rem',
+              backgroundColor: isPostgresConnected ? 'rgba(16, 185, 129, 0.15)' : 'rgba(245, 158, 11, 0.15)',
+              color: isPostgresConnected ? '#10B981' : '#F59E0B',
+              border: `1px solid ${isPostgresConnected ? 'rgba(16, 185, 129, 0.3)' : 'rgba(245, 158, 11, 0.3)'}`,
+            }}
+          >
+            <span
+              style={{
+                width: '6px',
+                height: '6px',
+                borderRadius: '50%',
+                backgroundColor: isPostgresConnected ? '#10B981' : '#F59E0B',
+              }}
+            />
+            {isPostgresConnected ? 'PostgreSQL' : 'Offline / LocalStorage'}
+          </span>
+        </div>
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
