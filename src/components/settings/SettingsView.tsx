@@ -25,6 +25,16 @@ export const SettingsView: React.FC = () => {
   const [portfolioUrl, setPortfolioUrl] = useState(user.portfolioUrl || '');
   const [savedSuccess, setSavedSuccess] = useState(false);
 
+  React.useEffect(() => {
+    if (user) {
+      setName(user.name || '');
+      setEmail(user.email || '');
+      setPhone(user.phone || '');
+      setLocation(user.location || '');
+      setPortfolioUrl(user.portfolioUrl || '');
+    }
+  }, [user]);
+
   const handleSaveProfile = (e: React.FormEvent) => {
     e.preventDefault();
     updateUserProfile({ name, email, phone, location, portfolioUrl });

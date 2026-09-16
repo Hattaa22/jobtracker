@@ -157,7 +157,7 @@ export const ForgotPasswordForm: React.FC<ForgotPasswordFormProps> = ({
                 padding: '0.625rem 0.875rem',
                 borderRadius: '0.5rem',
                 border: '1px solid var(--border)',
-                backgroundColor: 'var(--card-bg)',
+                backgroundColor: 'var(--surface)',
                 color: 'var(--text-primary)',
                 fontSize: '0.875rem',
                 outline: 'none',

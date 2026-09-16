@@ -1,22 +1,86 @@
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { OAuth2Client } = require('google-auth-library');
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const { query, initDatabase } = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-const JWT_SECRET = process.env.JWT_SECRET || 'jobtracker_super_secret_jwt_key_2026';
+
+// FIX FINDING #3: Cryptographic Secret Configuration
+if (!process.env.JWT_SECRET) {
+  console.warn('SECURITY WARNING: JWT_SECRET environment variable is not defined. Using a generated runtime secret key.');
+}
+const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 
 const googleClient = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : null;
 
-app.use(cors());
+// FIX FINDING #9: In-memory token blacklist for logout invalidation
+// Stores { token, expiresAt } — auto-pruned on each logout to prevent memory growth
+const tokenBlacklist = new Set();
+function blacklistToken(token) {
+  try {
+    const decoded = jwt.decode(token);
+    const expiresAt = decoded?.exp ? decoded.exp * 1000 : Date.now() + 7 * 24 * 60 * 60 * 1000;
+    tokenBlacklist.add(token);
+    // Prune expired tokens from blacklist to prevent unbounded memory growth
+    const now = Date.now();
+    for (const t of tokenBlacklist) {
+      try {
+        const d = jwt.decode(t);
+        if (d?.exp && d.exp * 1000 < now) tokenBlacklist.delete(t);
+      } catch { tokenBlacklist.delete(t); }
+    }
+  } catch { /* ignore */ }
+}
+function isTokenBlacklisted(token) {
+  return tokenBlacklist.has(token);
+}
+
+// FIX FINDING #6: Security Headers (Helmet) & Restricted CORS Origin
+app.use(helmet());
+
+const allowedOrigins = [
+  process.env.CLIENT_URL || 'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'http://localhost:5173',
+  'http://192.168.1.2:5173',
+];
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // FIX FINDING #8: Enforce CORS whitelist — reject all non-allowed origins
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error(`CORS policy: Origin '${origin}' is not allowed.`));
+      }
+    },
+    credentials: true,
+  })
+);
+
 app.use(express.json());
+
+// FIX FINDING #4: Rate Limiting on Authentication Endpoints (disabled/relaxed in test mode)
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: process.env.NODE_ENV === 'test' || process.env.DISABLE_RATE_LIMIT === 'true' ? 10000 : 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many authentication attempts. Please try again after 15 minutes.' },
+});
+
+app.use('/api/auth/', authLimiter);
 
 // Initialize Database schema on startup
 initDatabase();
@@ -30,13 +94,18 @@ function generateToken(user) {
   );
 }
 
-// Authentication Middleware
+// FIX FINDING #1: Strict Authentication Middleware (NO FALLBACK TO DEFAULT USER)
+// FIX FINDING #9: Also checks token blacklist (invalidated on logout)
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
 
   if (!token) {
     return res.status(401).json({ error: 'Authentication required. Please log in.' });
+  }
+
+  if (isTokenBlacklisted(token)) {
+    return res.status(401).json({ error: 'Session has been invalidated. Please log in again.' });
   }
 
   jwt.verify(token, JWT_SECRET, (err, decoded) => {
@@ -46,23 +115,6 @@ function authenticateToken(req, res, next) {
     req.user = decoded;
     next();
   });
-}
-
-// Optional Auth Middleware (allows fallback to default user-1 if no token provided)
-function optionalAuthenticateToken(req, res, next) {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-
-  if (token) {
-    jwt.verify(token, JWT_SECRET, (err, decoded) => {
-      if (!err) req.user = decoded;
-      else req.user = { id: 'user-1', email: 'hatta@example.com', name: 'Hatta' };
-      next();
-    });
-  } else {
-    req.user = { id: 'user-1', email: 'hatta@example.com', name: 'Hatta' };
-    next();
-  }
 }
 
 // Helper to format User object
@@ -89,13 +141,13 @@ function formatUser(u) {
   };
 }
 
-// Health Check
+// FIX FINDING #12: Health Check — minimal response, no technology fingerprinting
 app.get('/api/health', async (req, res) => {
   try {
-    const result = await query('SELECT NOW()');
-    res.json({ status: 'ok', time: result.rows[0].now, database: 'PostgreSQL' });
+    await query('SELECT 1');
+    res.json({ status: 'ok' });
   } catch (err) {
-    res.status(500).json({ status: 'error', message: err.message });
+    res.status(500).json({ status: 'error' });
   }
 });
 
@@ -114,8 +166,9 @@ app.post('/api/auth/register', async (req, res) => {
     if (!email || !email.trim() || !/\S+@\S+\.\S+/.test(email)) {
       return res.status(400).json({ error: 'Please enter a valid email address' });
     }
-    if (!password || password.length < 6) {
-      return res.status(400).json({ error: 'Password must be at least 6 characters long' });
+    // FIX FINDING #10: Minimum password length 8 chars (OWASP recommendation)
+    if (!password || password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters long' });
     }
 
     const trimmedEmail = email.trim().toLowerCase();
@@ -196,44 +249,37 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-// POST /api/auth/google
+// FIX FINDING #2: Strict Server-Side Google OAuth Token Verification (NO UNVERIFIED CLIENT PROFILE FALLBACK)
 app.post('/api/auth/google', async (req, res) => {
   try {
-    const { credential, profile } = req.body;
-    let googleId = '';
-    let email = '';
-    let name = '';
-    let picture = '';
+    const { credential } = req.body;
 
-    if (credential && googleClient) {
-      try {
-        const ticket = await googleClient.verifyIdToken({
-          idToken: credential,
-          audience: GOOGLE_CLIENT_ID,
-        });
-        const payload = ticket.getPayload();
-        googleId = payload.sub;
-        email = payload.email;
-        name = payload.name;
-        picture = payload.picture;
-      } catch {
-        // Fallback to client provided profile if backend client verification fails or client ID not set
-        if (profile) {
-          googleId = profile.googleId || profile.sub || `g-${Date.now()}`;
-          email = profile.email;
-          name = profile.name;
-          picture = profile.picture || profile.avatar;
-        }
-      }
-    } else if (profile) {
-      googleId = profile.googleId || profile.sub || `g-${Date.now()}`;
-      email = profile.email;
-      name = profile.name;
-      picture = profile.picture || profile.avatar;
+    if (!credential) {
+      return res.status(400).json({ error: 'Google ID Token credential is required.' });
     }
 
+    if (!GOOGLE_CLIENT_ID || !googleClient) {
+      return res.status(400).json({ error: 'Google OAuth is not configured on server. Please set GOOGLE_CLIENT_ID.' });
+    }
+
+    let payload;
+    try {
+      const ticket = await googleClient.verifyIdToken({
+        idToken: credential,
+        audience: GOOGLE_CLIENT_ID,
+      });
+      payload = ticket.getPayload();
+    } catch (verifyErr) {
+      return res.status(401).json({ error: 'Google authentication failed: Invalid Google ID token.' });
+    }
+
+    const googleId = payload.sub;
+    const email = payload.email;
+    const name = payload.name;
+    const picture = payload.picture;
+
     if (!email) {
-      return res.status(400).json({ error: 'Google authentication failed: Email not provided.' });
+      return res.status(400).json({ error: 'Google authentication failed: Email not provided by Google.' });
     }
 
     const trimmedEmail = email.trim().toLowerCase();
@@ -242,7 +288,6 @@ app.post('/api/auth/google', async (req, res) => {
     let user;
     if (result.rows.length > 0) {
       user = result.rows[0];
-      // Update avatar if changed
       if (picture && user.avatar_url !== picture) {
         const updatedRes = await query(
           'UPDATE users SET avatar_url = $1, provider_id = $2, updated_at = NOW() WHERE id = $3 RETURNING *',
@@ -251,7 +296,6 @@ app.post('/api/auth/google', async (req, res) => {
         user = updatedRes.rows[0];
       }
     } else {
-      // Create new Google User
       const userId = `user-${Date.now()}`;
       const newRes = await query(
         `INSERT INTO users (id, name, email, avatar_url, provider, provider_id, preferences)
@@ -305,7 +349,6 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       );
     }
 
-    // Generic response to prevent email enumeration attacks
     res.json({
       message: "If an account exists with this email, we'll send you a password reset link.",
     });
@@ -322,8 +365,9 @@ app.post('/api/auth/reset-password', async (req, res) => {
     if (!token) {
       return res.status(400).json({ error: 'Reset token is required' });
     }
-    if (!newPassword || newPassword.length < 6) {
-      return res.status(400).json({ error: 'New password must be at least 6 characters long' });
+    // FIX FINDING #10: Consistent minimum password length of 8 chars
+    if (!newPassword || newPassword.length < 8) {
+      return res.status(400).json({ error: 'New password must be at least 8 characters long' });
     }
 
     const result = await query(
@@ -358,20 +402,24 @@ app.get('/api/auth/me', authenticateToken, async (req, res) => {
     }
     res.json(formatUser(result.rows[0]));
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Server error fetching user profile.' });
   }
 });
 
 // POST /api/auth/logout
-app.post('/api/auth/logout', (req, res) => {
+// FIX FINDING #9: Require auth + blacklist the token to prevent reuse after logout
+app.post('/api/auth/logout', authenticateToken, (req, res) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  if (token) blacklistToken(token);
   res.json({ message: 'Logged out successfully' });
 });
 
 // =========================================================
-// PROTECTED USER PROFILE ENDPOINTS
+// PROTECTED USER PROFILE ENDPOINTS (STRICT AUTH)
 // =========================================================
 
-app.get('/api/user', optionalAuthenticateToken, async (req, res) => {
+app.get('/api/user', authenticateToken, async (req, res) => {
   try {
     const result = await query('SELECT * FROM users WHERE id = $1', [req.user.id]);
     if (result.rows.length === 0) {
@@ -379,23 +427,63 @@ app.get('/api/user', optionalAuthenticateToken, async (req, res) => {
     }
     res.json(formatUser(result.rows[0]));
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Server error fetching profile.' });
   }
 });
 
-app.put('/api/user', optionalAuthenticateToken, async (req, res) => {
+app.put('/api/user', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.id;
-    const { name, email, phone, location, portfolioUrl, githubUrl, linkedinUrl, preferences } = req.body;
-    
+    const { name, email, phone, location, portfolioUrl, githubUrl, linkedinUrl, preferences, currentPassword } = req.body;
+
+    // FIX FINDING #11: Input length limits on profile fields
+    if (name !== undefined && name.length > 100) {
+      return res.status(400).json({ error: 'Name must be 100 characters or fewer' });
+    }
+    if (phone !== undefined && phone && phone.length > 30) {
+      return res.status(400).json({ error: 'Phone number must be 30 characters or fewer' });
+    }
+    if (location !== undefined && location && location.length > 150) {
+      return res.status(400).json({ error: 'Location must be 150 characters or fewer' });
+    }
+    if (portfolioUrl !== undefined && portfolioUrl && portfolioUrl.length > 500) {
+      return res.status(400).json({ error: 'Portfolio URL must be 500 characters or fewer' });
+    }
+    if (githubUrl !== undefined && githubUrl && githubUrl.length > 500) {
+      return res.status(400).json({ error: 'GitHub URL must be 500 characters or fewer' });
+    }
+    if (linkedinUrl !== undefined && linkedinUrl && linkedinUrl.length > 500) {
+      return res.status(400).json({ error: 'LinkedIn URL must be 500 characters or fewer' });
+    }
+
     const current = await query('SELECT * FROM users WHERE id = $1', [userId]);
     if (current.rows.length === 0) {
       return res.status(404).json({ error: 'User not found' });
     }
-    
+
     const cur = current.rows[0];
+
+    // FIX FINDING #13: Require current password before allowing email change
+    if (email !== undefined && email.trim().toLowerCase() !== cur.email) {
+      if (!currentPassword) {
+        return res.status(400).json({ error: 'Current password is required to change your email address' });
+      }
+      if (!cur.password_hash) {
+        return res.status(400).json({ error: 'Email change is not available for accounts using social login' });
+      }
+      const passwordMatch = await bcrypt.compare(currentPassword, cur.password_hash);
+      if (!passwordMatch) {
+        return res.status(401).json({ error: 'Incorrect current password' });
+      }
+      // Check new email not already taken
+      const emailConflict = await query('SELECT id FROM users WHERE LOWER(email) = $1 AND id != $2', [email.trim().toLowerCase(), userId]);
+      if (emailConflict.rows.length > 0) {
+        return res.status(400).json({ error: 'This email address is already in use by another account' });
+      }
+    }
+
     const newName = name !== undefined ? name : cur.name;
-    const newEmail = email !== undefined ? email : cur.email;
+    const newEmail = email !== undefined ? email.trim().toLowerCase() : cur.email;
     const newPhone = phone !== undefined ? phone : cur.phone;
     const newLoc = location !== undefined ? location : cur.location;
     const newPort = portfolioUrl !== undefined ? portfolioUrl : cur.portfolio_url;
@@ -412,16 +500,16 @@ app.put('/api/user', optionalAuthenticateToken, async (req, res) => {
 
     res.json(formatUser(result.rows[0]));
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Server error updating profile.' });
   }
 });
 
 // =========================================================
-// DATA ISOLATION ENDPOINTS (SCOPED BY req.user.id)
+// DATA ISOLATION ENDPOINTS (STRICT AUTH SCOPED BY req.user.id)
 // =========================================================
 
 // Companies
-app.get('/api/companies', optionalAuthenticateToken, async (req, res) => {
+app.get('/api/companies', authenticateToken, async (req, res) => {
   try {
     const result = await query('SELECT * FROM companies WHERE user_id = $1 ORDER BY created_at DESC', [req.user.id]);
     const companies = result.rows.map(c => ({
@@ -437,13 +525,24 @@ app.get('/api/companies', optionalAuthenticateToken, async (req, res) => {
     }));
     res.json(companies);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Server error fetching companies.' });
   }
 });
 
-app.post('/api/companies', optionalAuthenticateToken, async (req, res) => {
+app.post('/api/companies', authenticateToken, async (req, res) => {
   try {
     const { name, website, location, industry, notes } = req.body;
+
+    // FIX FINDING #11: Input length limits on company fields
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: 'Company name is required' });
+    }
+    if (name.length > 150) return res.status(400).json({ error: 'Company name must be 150 characters or fewer' });
+    if (website && website.length > 500) return res.status(400).json({ error: 'Website URL must be 500 characters or fewer' });
+    if (location && location.length > 100) return res.status(400).json({ error: 'Location must be 100 characters or fewer' });
+    if (industry && industry.length > 100) return res.status(400).json({ error: 'Industry must be 100 characters or fewer' });
+    if (notes && notes.length > 5000) return res.status(400).json({ error: 'Notes must be 5000 characters or fewer' });
+
     const id = `comp-${Date.now()}`;
     const result = await query(
       `INSERT INTO companies (id, user_id, name, website, location, industry, notes)
@@ -463,12 +562,12 @@ app.post('/api/companies', optionalAuthenticateToken, async (req, res) => {
       updatedAt: c.updated_at,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Server error creating company.' });
   }
 });
 
 // Applications
-app.get('/api/applications', optionalAuthenticateToken, async (req, res) => {
+app.get('/api/applications', authenticateToken, async (req, res) => {
   try {
     const result = await query('SELECT * FROM applications WHERE user_id = $1 ORDER BY created_at DESC', [req.user.id]);
     const apps = result.rows.map(a => ({
@@ -497,7 +596,7 @@ app.get('/api/applications', optionalAuthenticateToken, async (req, res) => {
     }));
     res.json(apps);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Server error fetching applications.' });
   }
 });
 
@@ -519,10 +618,21 @@ async function findOrCreateCompanyDB(companyName, userId) {
   return inserted.rows[0];
 }
 
-app.post('/api/applications', optionalAuthenticateToken, async (req, res) => {
+app.post('/api/applications', authenticateToken, async (req, res) => {
   try {
     const appData = req.body;
     const userId = req.user.id;
+
+    // FIX FINDING #11: Input length limits on application fields
+    if (appData.companyName && appData.companyName.length > 150) return res.status(400).json({ error: 'Company name must be 150 characters or fewer' });
+    if (appData.position && appData.position.length > 150) return res.status(400).json({ error: 'Position must be 150 characters or fewer' });
+    if (appData.notes && appData.notes.length > 5000) return res.status(400).json({ error: 'Notes must be 5000 characters or fewer' });
+    if (appData.jobUrl && appData.jobUrl.length > 500) return res.status(400).json({ error: 'Job URL must be 500 characters or fewer' });
+    if (appData.jobReference && appData.jobReference.length > 100) return res.status(400).json({ error: 'Job reference must be 100 characters or fewer' });
+    if (appData.recruiterName && appData.recruiterName.length > 100) return res.status(400).json({ error: 'Recruiter name must be 100 characters or fewer' });
+    if (appData.recruiterEmail && appData.recruiterEmail.length > 100) return res.status(400).json({ error: 'Recruiter email must be 100 characters or fewer' });
+    if (appData.recruiterPhone && appData.recruiterPhone.length > 30) return res.status(400).json({ error: 'Recruiter phone must be 30 characters or fewer' });
+
     const company = await findOrCreateCompanyDB(appData.companyName || 'Unknown Company', userId);
     const today = appData.applicationDate || new Date().toISOString().split('T')[0];
     const appId = `app-${Date.now()}`;
@@ -591,14 +701,20 @@ app.post('/api/applications', optionalAuthenticateToken, async (req, res) => {
       updatedAt: a.updated_at,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Server error creating application.' });
   }
 });
 
-app.post('/api/applications/quick-apply', optionalAuthenticateToken, async (req, res) => {
+app.post('/api/applications/quick-apply', authenticateToken, async (req, res) => {
   try {
     const { companyName, position, source, jobUrl, applicationDate, status } = req.body;
     const userId = req.user.id;
+
+    // FIX FINDING #11: Input length limits on quick-apply fields
+    if (companyName && companyName.length > 150) return res.status(400).json({ error: 'Company name must be 150 characters or fewer' });
+    if (position && position.length > 150) return res.status(400).json({ error: 'Position must be 150 characters or fewer' });
+    if (jobUrl && jobUrl.length > 500) return res.status(400).json({ error: 'Job URL must be 500 characters or fewer' });
+
     const company = await findOrCreateCompanyDB(companyName, userId);
     const today = applicationDate || new Date().toISOString().split('T')[0];
     const appId = `app-${Date.now()}`;
@@ -652,11 +768,11 @@ app.post('/api/applications/quick-apply', optionalAuthenticateToken, async (req,
       updatedAt: a.updated_at,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Server error processing quick apply.' });
   }
 });
 
-app.put('/api/applications/:id', optionalAuthenticateToken, async (req, res) => {
+app.put('/api/applications/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user.id;
@@ -734,11 +850,11 @@ app.put('/api/applications/:id', optionalAuthenticateToken, async (req, res) => 
       updatedAt: a.updated_at,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Server error updating application.' });
   }
 });
 
-app.put('/api/applications/:id/status', optionalAuthenticateToken, async (req, res) => {
+app.put('/api/applications/:id/status', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user.id;
@@ -767,23 +883,26 @@ app.put('/api/applications/:id/status', optionalAuthenticateToken, async (req, r
 
     res.json({ message: 'Status updated successfully' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Server error updating application status.' });
   }
 });
 
-app.delete('/api/applications/:id', optionalAuthenticateToken, async (req, res) => {
+app.delete('/api/applications/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user.id;
-    await query('DELETE FROM applications WHERE id = $1 AND user_id = $2', [id, userId]);
-    res.json({ message: 'Application deleted' });
+    const deleteRes = await query('DELETE FROM applications WHERE id = $1 AND user_id = $2 RETURNING id', [id, userId]);
+    if (deleteRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Application not found or unauthorized' });
+    }
+    res.json({ message: 'Application deleted successfully' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Server error deleting application.' });
   }
 });
 
 // Application Events
-app.get('/api/events', optionalAuthenticateToken, async (req, res) => {
+app.get('/api/events', authenticateToken, async (req, res) => {
   try {
     const result = await query(
       `SELECT e.* FROM application_events e
@@ -802,12 +921,12 @@ app.get('/api/events', optionalAuthenticateToken, async (req, res) => {
     }));
     res.json(events);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Server error fetching events.' });
   }
 });
 
 // Interviews
-app.get('/api/interviews', optionalAuthenticateToken, async (req, res) => {
+app.get('/api/interviews', authenticateToken, async (req, res) => {
   try {
     const result = await query(
       `SELECT i.* FROM interview_schedules i
@@ -828,11 +947,11 @@ app.get('/api/interviews', optionalAuthenticateToken, async (req, res) => {
     }));
     res.json(interviews);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Server error fetching interviews.' });
   }
 });
 
-app.post('/api/interviews', optionalAuthenticateToken, async (req, res) => {
+app.post('/api/interviews', authenticateToken, async (req, res) => {
   try {
     const { applicationId, type, date, time, location, meetingUrl, notes } = req.body;
     const userId = req.user.id;
@@ -876,26 +995,29 @@ app.post('/api/interviews', optionalAuthenticateToken, async (req, res) => {
       createdAt: i.created_at,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Server error creating interview schedule.' });
   }
 });
 
-app.delete('/api/interviews/:id', optionalAuthenticateToken, async (req, res) => {
+app.delete('/api/interviews/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user.id;
-    await query(
-      `DELETE FROM interview_schedules WHERE id = $1 AND application_id IN (SELECT id FROM applications WHERE user_id = $2)`,
+    const deleteRes = await query(
+      `DELETE FROM interview_schedules WHERE id = $1 AND application_id IN (SELECT id FROM applications WHERE user_id = $2) RETURNING id`,
       [id, userId]
     );
+    if (deleteRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Interview not found or unauthorized' });
+    }
     res.json({ message: 'Interview deleted' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Server error deleting interview.' });
   }
 });
 
 // Follow Ups
-app.get('/api/followups', optionalAuthenticateToken, async (req, res) => {
+app.get('/api/followups', authenticateToken, async (req, res) => {
   try {
     const result = await query(
       `SELECT f.* FROM follow_ups f
@@ -915,14 +1037,18 @@ app.get('/api/followups', optionalAuthenticateToken, async (req, res) => {
     }));
     res.json(followUps);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Server error fetching followups.' });
   }
 });
 
-app.post('/api/followups', optionalAuthenticateToken, async (req, res) => {
+app.post('/api/followups', authenticateToken, async (req, res) => {
   try {
     const { applicationId, followUpDate, contactMethod, contactPerson, message, status } = req.body;
     const userId = req.user.id;
+
+    // FIX FINDING #11: Input length limits on follow-up fields
+    if (contactPerson && contactPerson.length > 100) return res.status(400).json({ error: 'Contact person must be 100 characters or fewer' });
+    if (message && message.length > 2000) return res.status(400).json({ error: 'Message must be 2000 characters or fewer' });
 
     // Verify application belongs to user
     const appRes = await query('SELECT id FROM applications WHERE id = $1 AND user_id = $2', [applicationId, userId]);
@@ -948,38 +1074,44 @@ app.post('/api/followups', optionalAuthenticateToken, async (req, res) => {
       createdAt: f.created_at,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Server error creating follow-up.' });
   }
 });
 
-app.put('/api/followups/:id/status', optionalAuthenticateToken, async (req, res) => {
+app.put('/api/followups/:id/status', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user.id;
-    await query(
-      `UPDATE follow_ups SET status = $1 WHERE id = $2 AND application_id IN (SELECT id FROM applications WHERE user_id = $3)`,
+    const updateRes = await query(
+      `UPDATE follow_ups SET status = $1 WHERE id = $2 AND application_id IN (SELECT id FROM applications WHERE user_id = $3) RETURNING id`,
       [req.body.status, id, userId]
     );
+    if (updateRes.rows.length === 0) {
+      return res.status(404).json({ error: 'FollowUp not found or unauthorized' });
+    }
     res.json({ message: 'FollowUp status updated' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Server error updating follow-up status.' });
   }
 });
 
-app.delete('/api/followups/:id', optionalAuthenticateToken, async (req, res) => {
+app.delete('/api/followups/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user.id;
-    await query(
-      `DELETE FROM follow_ups WHERE id = $1 AND application_id IN (SELECT id FROM applications WHERE user_id = $2)`,
+    const deleteRes = await query(
+      `DELETE FROM follow_ups WHERE id = $1 AND application_id IN (SELECT id FROM applications WHERE user_id = $2) RETURNING id`,
       [id, userId]
     );
+    if (deleteRes.rows.length === 0) {
+      return res.status(404).json({ error: 'FollowUp not found or unauthorized' });
+    }
     res.json({ message: 'FollowUp deleted' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Server error deleting follow-up.' });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Server JobTracker PostgreSQL running on http://localhost:${PORT}`);
+  console.log(`Server JobTracker PostgreSQL running securely on http://localhost:${PORT}`);
 });

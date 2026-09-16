@@ -2,11 +2,13 @@ import React, { useState } from 'react';
 
 interface GoogleLoginButtonProps {
   onSuccess: (credential?: string, profile?: any) => Promise<void>;
+  onError?: (message: string) => void;
   isLoading?: boolean;
 }
 
 export const GoogleLoginButton: React.FC<GoogleLoginButtonProps> = ({
   onSuccess,
+  onError,
   isLoading = false,
 }) => {
   const [connecting, setConnecting] = useState(false);
@@ -18,32 +20,33 @@ export const GoogleLoginButton: React.FC<GoogleLoginButtonProps> = ({
     try {
       // Check if Google Identity Services (gsi/client) is loaded
       if (typeof window !== 'undefined' && (window as any).google?.accounts?.id) {
+        // Initialize with credential callback so onSuccess is called with the real token
+        (window as any).google.accounts.id.initialize({
+          client_id: '', // Loaded from meta tag by GSI script if set
+          callback: async (response: any) => {
+            if (response?.credential) {
+              await onSuccess(response.credential);
+            }
+          },
+        });
         (window as any).google.accounts.id.prompt((notification: any) => {
           if (notification.isNotDisplayed() || notification.isSkippedMoment()) {
-            // Fallback simulation for dev/testing if OAuth popup blocked or client ID dummy
-            simulateGoogleAuth();
+            // FIX FINDING #14: Show a clear error instead of silently sending undefined credential
+            const msg = 'Google sign-in was blocked or dismissed. Please try again, or check if your browser blocks pop-ups.';
+            if (onError) onError(msg);
           }
         });
       } else {
-        // Dev / testing fallback for Google OAuth
-        await simulateGoogleAuth();
+        // FIX FINDING #14: Google OAuth not loaded — show a clear user-facing error
+        const msg = 'Google sign-in is not available. Please ensure you are connected to the internet, or use email/password login.';
+        if (onError) onError(msg);
       }
     } catch (err) {
       console.error('Google OAuth error:', err);
+      if (onError) onError('Google sign-in encountered an error. Please try again.');
     } finally {
       setConnecting(false);
     }
-  };
-
-  const simulateGoogleAuth = async () => {
-    // Demo Google User payload for testing when GOOGLE_CLIENT_ID is in sandbox
-    const mockProfile = {
-      googleId: 'google-1092837465',
-      email: 'hatta.google@example.com',
-      name: 'Hatta (Google)',
-      avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150',
-    };
-    await onSuccess(undefined, mockProfile);
   };
 
   const loadingState = connecting || isLoading;
@@ -62,7 +65,7 @@ export const GoogleLoginButton: React.FC<GoogleLoginButtonProps> = ({
         padding: '0.75rem 1rem',
         borderRadius: '0.5rem',
         border: '1px solid var(--border)',
-        backgroundColor: 'var(--card-bg)',
+        backgroundColor: 'var(--surface)',
         color: 'var(--text-primary)',
         fontWeight: 600,
         fontSize: '0.875rem',

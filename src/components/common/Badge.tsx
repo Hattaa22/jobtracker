@@ -65,25 +65,3 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({
     </span>
   );
 };
-
-interface SourceBadgeProps {
-  source: string;
-  size?: 'sm' | 'md';
-}
-
-export const SourceBadge: React.FC<SourceBadgeProps> = ({ source, size = 'sm' }) => (
-  <span
-    style={{
-      display: 'inline-block',
-      padding: size === 'sm' ? '0.125rem 0.5rem' : '0.25rem 0.625rem',
-      fontSize: size === 'sm' ? '0.625rem' : '0.6875rem',
-      fontWeight: 600,
-      borderRadius: '0.375rem',
-      backgroundColor: 'var(--surface-hover)',
-      color: 'var(--text-secondary)',
-      border: '1px solid var(--border)',
-    }}
-  >
-    {source}
-  </span>
-);

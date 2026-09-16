@@ -163,7 +163,7 @@ export const RegisterForm: React.FC<RegisterFormProps> = ({
       )}
 
       {/* Form */}
-      <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+      <form onSubmit={handleSubmit} noValidate style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
         {/* Full Name */}
         <div>
           <label
@@ -191,7 +191,7 @@ export const RegisterForm: React.FC<RegisterFormProps> = ({
               padding: '0.625rem 0.875rem',
               borderRadius: '0.5rem',
               border: `1px solid ${errors.name ? '#EF4444' : 'var(--border)'}`,
-              backgroundColor: 'var(--card-bg)',
+              backgroundColor: 'var(--surface)',
               color: 'var(--text-primary)',
               fontSize: '0.875rem',
               outline: 'none',
@@ -232,7 +232,7 @@ export const RegisterForm: React.FC<RegisterFormProps> = ({
               padding: '0.625rem 0.875rem',
               borderRadius: '0.5rem',
               border: `1px solid ${errors.email ? '#EF4444' : 'var(--border)'}`,
-              backgroundColor: 'var(--card-bg)',
+              backgroundColor: 'var(--surface)',
               color: 'var(--text-primary)',
               fontSize: '0.875rem',
               outline: 'none',
@@ -274,7 +274,7 @@ export const RegisterForm: React.FC<RegisterFormProps> = ({
                 padding: '0.625rem 2.5rem 0.625rem 0.875rem',
                 borderRadius: '0.5rem',
                 border: `1px solid ${errors.password ? '#EF4444' : 'var(--border)'}`,
-                backgroundColor: 'var(--card-bg)',
+                backgroundColor: 'var(--surface)',
                 color: 'var(--text-primary)',
                 fontSize: '0.875rem',
                 outline: 'none',
@@ -337,7 +337,7 @@ export const RegisterForm: React.FC<RegisterFormProps> = ({
                 padding: '0.625rem 2.5rem 0.625rem 0.875rem',
                 borderRadius: '0.5rem',
                 border: `1px solid ${errors.confirmPassword ? '#EF4444' : 'var(--border)'}`,
-                backgroundColor: 'var(--card-bg)',
+                backgroundColor: 'var(--surface)',
                 color: 'var(--text-primary)',
                 fontSize: '0.875rem',
                 outline: 'none',
@@ -413,7 +413,11 @@ export const RegisterForm: React.FC<RegisterFormProps> = ({
       </div>
 
       {/* Google OAuth Button */}
-      <GoogleLoginButton onSuccess={handleGoogleAuth} isLoading={isLoading} />
+      <GoogleLoginButton
+        onSuccess={handleGoogleAuth}
+        onError={(msg) => setErrors({ form: msg })}
+        isLoading={isLoading}
+      />
 
       {/* Footer link to Login */}
       <p style={{ textAlign: 'center', fontSize: '0.875rem', color: 'var(--text-muted)', marginTop: '1.5rem' }}>

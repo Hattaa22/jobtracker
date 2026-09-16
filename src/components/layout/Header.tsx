@@ -180,7 +180,7 @@ export const Header: React.FC<HeaderProps> = ({
                 padding: '0.375rem 0.625rem',
                 borderRadius: '0.5rem',
                 border: '1px solid var(--border)',
-                backgroundColor: 'var(--card-bg)',
+                backgroundColor: 'var(--surface)',
                 cursor: 'pointer',
               }}
             >
@@ -220,18 +220,18 @@ export const Header: React.FC<HeaderProps> = ({
                 style={{
                   position: 'absolute',
                   right: 0,
-                  marginTop: '0.5rem',
-                  width: '240px',
-                  backgroundColor: 'var(--card-bg)',
-                  border: '1px solid var(--border)',
-                  borderRadius: '0.75rem',
-                  boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.2)',
-                  zIndex: 50,
+                  top: 'calc(100% + 0.5rem)',
+                  width: '260px',
+                  backgroundColor: 'var(--surface)',
+                  border: '1px solid var(--border-strong)',
+                  borderRadius: '0.875rem',
+                  boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.25), 0 8px 10px -6px rgba(0, 0, 0, 0.15)',
+                  zIndex: 1000,
                   overflow: 'hidden',
                 }}
               >
                 {/* User Header */}
-                <div style={{ padding: '0.875rem 1rem', borderBottom: '1px solid var(--border)', backgroundColor: 'rgba(0,0,0,0.02)' }}>
+                <div style={{ padding: '0.875rem 1rem', borderBottom: '1px solid var(--border)', backgroundColor: 'var(--surface-hover)' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.625rem' }}>
                     {displayAvatar ? (
                       <img src={displayAvatar} alt={displayName} style={{ width: '2.25rem', height: '2.25rem', borderRadius: '50%' }} />

@@ -172,7 +172,7 @@ export const LoginForm: React.FC<LoginFormProps> = ({
               padding: '0.625rem 0.875rem',
               borderRadius: '0.5rem',
               border: `1px solid ${errors.email ? '#EF4444' : 'var(--border)'}`,
-              backgroundColor: 'var(--card-bg)',
+              backgroundColor: 'var(--surface)',
               color: 'var(--text-primary)',
               fontSize: '0.875rem',
               outline: 'none',
@@ -229,7 +229,7 @@ export const LoginForm: React.FC<LoginFormProps> = ({
                 padding: '0.625rem 2.5rem 0.625rem 0.875rem',
                 borderRadius: '0.5rem',
                 border: `1px solid ${errors.password ? '#EF4444' : 'var(--border)'}`,
-                backgroundColor: 'var(--card-bg)',
+                backgroundColor: 'var(--surface)',
                 color: 'var(--text-primary)',
                 fontSize: '0.875rem',
                 outline: 'none',
@@ -318,7 +318,11 @@ export const LoginForm: React.FC<LoginFormProps> = ({
       </div>
 
       {/* Google OAuth Button */}
-      <GoogleLoginButton onSuccess={handleGoogleAuth} isLoading={isLoading} />
+      <GoogleLoginButton
+        onSuccess={handleGoogleAuth}
+        onError={(msg) => setErrors({ form: msg })}
+        isLoading={isLoading}
+      />
 
       {/* Footer link to Register */}
       <p style={{ textAlign: 'center', fontSize: '0.875rem', color: 'var(--text-muted)', marginTop: '1.75rem' }}>

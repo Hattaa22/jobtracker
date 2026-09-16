@@ -7,16 +7,6 @@ import type {
   FollowUp,
 } from '../types';
 
-const STORAGE_KEYS = {
-  USER: 'jobtrack_user',
-  APPLICATIONS: 'jobtrack_applications',
-  COMPANIES: 'jobtrack_companies',
-  EVENTS: 'jobtrack_events',
-  INTERVIEWS: 'jobtrack_interviews',
-  FOLLOW_UPS: 'jobtrack_followups',
-  ATTACHMENTS: 'jobtrack_attachments',
-};
-
 export const defaultUser: UserProfile = {
   id: 'user-1',
   name: 'Hatta',
@@ -221,26 +211,5 @@ export const setStorageData = <T>(key: string, value: T): void => {
     localStorage.setItem(key, JSON.stringify(value));
   } catch (err) {
     console.error(`Error writing ${key} to storage:`, err);
-  }
-};
-
-export const initializeDefaultStorage = () => {
-  if (!localStorage.getItem(STORAGE_KEYS.APPLICATIONS)) {
-    setStorageData(STORAGE_KEYS.APPLICATIONS, sampleApplications);
-  }
-  if (!localStorage.getItem(STORAGE_KEYS.COMPANIES)) {
-    setStorageData(STORAGE_KEYS.COMPANIES, sampleCompanies);
-  }
-  if (!localStorage.getItem(STORAGE_KEYS.USER)) {
-    setStorageData(STORAGE_KEYS.USER, defaultUser);
-  }
-  if (!localStorage.getItem(STORAGE_KEYS.EVENTS)) {
-    setStorageData(STORAGE_KEYS.EVENTS, sampleEvents);
-  }
-  if (!localStorage.getItem(STORAGE_KEYS.INTERVIEWS)) {
-    setStorageData(STORAGE_KEYS.INTERVIEWS, sampleInterviews);
-  }
-  if (!localStorage.getItem(STORAGE_KEYS.FOLLOW_UPS)) {
-    setStorageData(STORAGE_KEYS.FOLLOW_UPS, sampleFollowUps);
   }
 };

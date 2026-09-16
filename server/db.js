@@ -1,5 +1,6 @@
 const { Pool } = require('pg');
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const connectionString = process.env.DATABASE_URL;
 
@@ -14,8 +15,8 @@ const poolConfig = connectionString
   : {
       host: process.env.DB_HOST || 'localhost',
       port: parseInt(process.env.DB_PORT || '5432'),
-      user: process.env.DB_USER || 'postgres',
-      password: process.env.DB_PASSWORD || 'postgres',
+      user: process.env.DB_USER,
+      password: process.env.DB_PASSWORD,
       database: process.env.DB_NAME || 'jobtracker',
       ssl: isRemote ? { rejectUnauthorized: false } : false,
     };
@@ -145,32 +146,8 @@ const initDatabase = async () => {
 
     console.log('PostgreSQL schema verification/creation completed.');
 
-    // Seed default user if not exists
-    const userRes = await client.query('SELECT id FROM users WHERE id = $1', ['user-1']);
-    if (userRes.rowCount === 0) {
-      console.log('Seeding initial default user...');
-      await client.query(
-        `INSERT INTO users (id, name, email, phone, location, portfolio_url, github_url, linkedin_url, preferences)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-        [
-          'user-1',
-          'Hatta',
-          'hatta@example.com',
-          '+62 812-3456-7890',
-          'Surabaya, Indonesia',
-          'https://hatta.dev',
-          'https://github.com/hatta',
-          'https://linkedin.com/in/hatta',
-          JSON.stringify({
-            defaultStatus: 'Applied',
-            defaultSource: 'JobStreet',
-            currency: 'IDR',
-            dateFormat: 'DD MMM YYYY',
-            theme: 'light',
-          }),
-        ]
-      );
-    }
+    // FIX FINDING #15: Removed hardcoded seed user — users must register via /api/auth/register
+    // The seed user 'user-1' had no password_hash and could not log in.
 
     client.release();
   } catch (err) {
