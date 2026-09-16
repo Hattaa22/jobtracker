@@ -18,7 +18,7 @@ export interface AuthResponse {
   user: User;
 }
 
-const API_BASE = 'http://localhost:5000/api/auth';
+const API_BASE = `${(import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api').replace(/\/$/, '')}/auth`;
 
 export const getStoredToken = (): string | null => {
   return localStorage.getItem('jobtrack_auth_token');

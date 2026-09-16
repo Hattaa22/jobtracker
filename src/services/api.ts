@@ -22,7 +22,7 @@ import {
 
 import { getStoredToken } from './authService';
 
-const API_BASE = 'http://localhost:5000/api';
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api').replace(/\/$/, '');
 
 async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {
   const token = getStoredToken();

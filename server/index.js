@@ -48,12 +48,17 @@ function isTokenBlacklisted(token) {
 // FIX FINDING #6: Security Headers (Helmet) & Restricted CORS Origin
 app.use(helmet());
 
+const configuredOrigins = (process.env.CLIENT_URL || '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
 const allowedOrigins = [
-  process.env.CLIENT_URL || 'http://localhost:5173',
+  ...configuredOrigins,
   'http://127.0.0.1:5173',
   'http://localhost:5173',
   'http://192.168.1.2:5173',
-];
+].filter((origin, index, origins) => origins.indexOf(origin) === index);
 
 app.use(
   cors({
