@@ -219,6 +219,10 @@ app.post('/api/auth/register', async (req, res) => {
 
     res.status(201).json({ token, user: userObj });
   } catch (err) {
+    console.error('Registration failed:', {
+      code: err.code,
+      message: err.message,
+    });
     res.status(500).json({ error: 'Server error during registration. Please try again.' });
   }
 });
@@ -258,6 +262,10 @@ app.post('/api/auth/login', async (req, res) => {
 
     res.json({ token, user: userObj });
   } catch (err) {
+    console.error('Login failed:', {
+      code: err.code,
+      message: err.message,
+    });
     res.status(500).json({ error: 'Server error during login. Please try again.' });
   }
 });
