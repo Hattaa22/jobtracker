@@ -14,6 +14,10 @@ const { query, initDatabase } = require('./db');
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// Vercel runs the app behind a proxy. This lets Express and express-rate-limit
+// safely read forwarded client IP headers without rejecting requests.
+app.set('trust proxy', 1);
+
 // FIX FINDING #3: Cryptographic Secret Configuration
 if (!process.env.JWT_SECRET) {
   console.warn('SECURITY WARNING: JWT_SECRET environment variable is not defined. Using a generated runtime secret key.');
@@ -152,6 +156,10 @@ app.get('/api/health', async (req, res) => {
     await query('SELECT 1');
     res.json({ status: 'ok' });
   } catch (err) {
+    console.error('Health check database query failed:', {
+      code: err.code,
+      message: err.message,
+    });
     res.status(500).json({ status: 'error' });
   }
 });
